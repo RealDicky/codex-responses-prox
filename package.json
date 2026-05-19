@@ -1,0 +1,9 @@
+{
+  "name": "codex-responses-proxy",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "proxy.mjs",
+  "scripts": {
+    "start": "node proxy.mjs"
+  }
+}
