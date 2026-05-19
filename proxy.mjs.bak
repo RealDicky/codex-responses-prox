@@ -24,9 +24,9 @@ function loadConfig() {
       upstream_model: model,
     };
     // Also honour MODEL_ROUTING env var
-    const rawRouting = process.env.MODEL_ROUTING;
-    if (rawRouting) {
-      try { return JSON.parse(rawRouting); } catch { console.error("Invalid MODEL_ROUTING JSON"); }
+    const raw = process.env.MODEL_ROUTING;
+    if (raw) {
+      try { return JSON.parse(raw); } catch { console.error("Invalid MODEL_ROUTING JSON"); }
     }
     return routing;
   }
@@ -75,31 +75,20 @@ function saveSession(responseId, messages) {
 // API output we send), so we cache it here by call_id and re-inject it when
 // rebuilding the assistant message in toChatCompletions.
 const toolCallReasoning = new Map();
-const responseReasoning = new Map();
 const MAX_REASONING = 500;
 
-function saveReasoning(callIds, reasoningContent, respId) {
-  if (!reasoningContent) return;
-  if (callIds.length) {
-    for (const id of callIds) toolCallReasoning.set(id, reasoningContent);
-  }
-  if (respId) responseReasoning.set(respId, reasoningContent);
-  const totalSize = toolCallReasoning.size + responseReasoning.size;
-  if (totalSize > MAX_REASONING * 2) {
+function saveReasoning(callIds, reasoningContent) {
+  if (!reasoningContent || !callIds.length) return;
+  for (const id of callIds) toolCallReasoning.set(id, reasoningContent);
+  if (toolCallReasoning.size > MAX_REASONING) {
     let n = toolCallReasoning.size - MAX_REASONING;
-    if (n > 0) for (const k of toolCallReasoning.keys()) { toolCallReasoning.delete(k); if (--n <= 0) break; }
-    n = responseReasoning.size - MAX_REASONING;
-    if (n > 0) for (const k of responseReasoning.keys()) { responseReasoning.delete(k); if (--n <= 0) break; }
+    for (const k of toolCallReasoning.keys()) { toolCallReasoning.delete(k); if (--n <= 0) break; }
   }
 }
 
-function getReasoningByCallIds(callIds) {
+function getReasoning(callIds) {
   for (const id of callIds) { const r = toolCallReasoning.get(id); if (r) return r; }
   return null;
-}
-
-function getReasoningByRespId(respId) {
-  return respId ? responseReasoning.get(respId) : null;
 }
 
 // --- Helpers ---
@@ -137,7 +126,8 @@ function toChatCompletions(reqBody, provider) {
     const flushToolCalls = () => {
       if (pendingToolCalls.length > 0) {
         const msg = { role: "assistant", content: null, tool_calls: [...pendingToolCalls] };
-        const reasoning = getReasoningByCallIds(pendingToolCalls.map((tc) => tc.id));
+        // DeepSeek thinking mode: re-attach reasoning_content so upstream doesn't reject
+        const reasoning = getReasoning(pendingToolCalls.map((tc) => tc.id));
         if (reasoning) msg.reasoning_content = reasoning;
         messages.push(msg);
         pendingToolCalls.length = 0;
@@ -156,21 +146,24 @@ function toChatCompletions(reqBody, provider) {
         if (item.role === "user") {
           messages.push({ role: "user", content });
         } else if (item.role === "assistant") {
-          const msg = { role: "assistant", content };
-          const reasoning = getReasoningByRespId(item.id);
-          if (reasoning) msg.reasoning_content = reasoning;
-          messages.push(msg);
+          messages.push({ role: "assistant", content });
         }
+        // system items inside input are rare but harmless to skip
       } else if (item.type === "function_call") {
+        // Responses API: represents a previous assistant tool call in the history.
+        // Buffer for grouping — consecutive calls belong to the same assistant turn.
         pendingToolCalls.push({
           id: item.call_id || item.id,
           type: "function",
           function: { name: item.name, arguments: item.arguments },
         });
       } else if (item.type === "function_call_output") {
+        // Must be preceded by the matching assistant tool_calls message.
+        // Inject reasoning_content if DeepSeek thinking mode was used for that turn.
         flushToolCalls();
         messages.push({ role: "tool", content: item.output, tool_call_id: item.call_id });
       }
+      // Other item types (reasoning, web_search_call, …) are silently skipped.
     }
     flushToolCalls();
   }
@@ -186,20 +179,12 @@ function toChatCompletions(reqBody, provider) {
   if (reqBody.top_p !== undefined) ccReq.top_p = reqBody.top_p;
 
   if (reqBody.tools && reqBody.tools.length > 0) {
+    // Responses API tool shape: { type, name, description, parameters }
+    // Chat Completions tool shape: { type, function: { name, description, parameters } }
     ccReq.tools = reqBody.tools
       .filter((t) => t.type === "function")
       .map(({ type: _t, ...rest }) => ({ type: "function", function: rest }));
     if (reqBody.tool_choice) ccReq.tool_choice = reqBody.tool_choice;
-  }
-
-  if (provider.thinking !== undefined) {
-    ccReq.thinking = provider.thinking;
-  } else if (provider.base_url.includes("deepseek")) {
-    ccReq.thinking = { type: "enabled" };
-  }
-
-  if (provider.reasoning_effort) {
-    ccReq.reasoning_effort = provider.reasoning_effort;
   }
 
   return ccReq;
@@ -210,14 +195,12 @@ function toResponsesAPI(ccResp, model) {
   const choice = ccResp.choices?.[0];
   const msg = choice?.message;
   const output = [];
-  const respId = genId("resp");
-  const msgId = genId("msg");
 
   if (msg) {
     if (msg.content) {
       output.push({
         type: "message",
-        id: msgId,
+        id: genId("msg"),
         role: "assistant",
         content: [{ type: "output_text", text: msg.content }],
         status: "completed",
@@ -237,13 +220,8 @@ function toResponsesAPI(ccResp, model) {
     }
   }
 
-  if (msg?.reasoning_content) {
-    const callIds = msg.tool_calls?.map((tc) => tc.id) || [];
-    saveReasoning(callIds, msg.reasoning_content, msgId);
-  }
-
   return {
-    id: respId,
+    id: genId("resp"),
     object: "response",
     created_at: Math.floor(Date.now() / 1000),
     model: model || ccResp.model,
@@ -328,58 +306,6 @@ function handleStream(upstreamUrl, apiKey, ccReq, reqBody, res) {
     let outputIndex = 0;
     const reasoningId = genId("rs");
 
-    // State machine for stripping <think>...</think> from content stream.
-    // Some models embed thinking in content rather than reasoning_content field.
-    let inThinkTag = false;
-    let thinkBuf = ""; // partial tag buffer for cross-chunk tag detection
-
-    function processContentDelta(text) {
-      // Returns { visible, reasoning } — splits out <think> blocks
-      let visible = "";
-      let reasoning = "";
-      let s = thinkBuf + text;
-      thinkBuf = "";
-
-      while (s.length > 0) {
-        if (inThinkTag) {
-          const end = s.indexOf("</think>");
-          if (end === -1) {
-            // Check if a partial closing tag is at the tail
-            const partial = "</think>";
-            let tail = 0;
-            for (let i = 1; i <= Math.min(partial.length - 1, s.length); i++) {
-              if (partial.startsWith(s.slice(s.length - i))) tail = i;
-            }
-            reasoning += s.slice(0, s.length - tail);
-            thinkBuf = s.slice(s.length - tail);
-            s = "";
-          } else {
-            reasoning += s.slice(0, end);
-            inThinkTag = false;
-            s = s.slice(end + "</think>".length);
-          }
-        } else {
-          const start = s.indexOf("<think>");
-          if (start === -1) {
-            // Check if a partial opening tag is at the tail
-            const partial = "<think>";
-            let tail = 0;
-            for (let i = 1; i <= Math.min(partial.length - 1, s.length); i++) {
-              if (partial.startsWith(s.slice(s.length - i))) tail = i;
-            }
-            visible += s.slice(0, s.length - tail);
-            thinkBuf = s.slice(s.length - tail);
-            s = "";
-          } else {
-            visible += s.slice(0, start);
-            inThinkTag = true;
-            s = s.slice(start + "<think>".length);
-          }
-        }
-      }
-      return { visible, reasoning };
-    }
-
     upstreamRes.on("data", (chunk) => {
       buffer += chunk.toString();
       const lines = buffer.split("\n");
@@ -399,7 +325,9 @@ function handleStream(upstreamUrl, apiKey, ccReq, reqBody, res) {
         const delta = ccChunk.choices?.[0]?.delta;
         if (!delta) continue;
 
-        // --- Reasoning content (dedicated field, e.g. deepseek-reasoner) ---
+        // --- Reasoning content (DeepSeek thinking mode) ---
+        // Forward as Responses API reasoning events so Codex doesn't time out
+        // waiting for the first content event during a long thinking phase.
         if (delta.reasoning_content) {
           totalReasoning += delta.reasoning_content;
           if (!reasoningStarted) {
@@ -418,30 +346,8 @@ function handleStream(upstreamUrl, apiKey, ccReq, reqBody, res) {
           }));
         }
 
-        // --- Text content (strip embedded <think>...</think> blocks) ---
+        // --- Text content ---
         if (delta.content) {
-          const { visible, reasoning } = processContentDelta(delta.content);
-
-          // Forward extracted think text as reasoning events
-          if (reasoning) {
-            totalReasoning += reasoning;
-            if (!reasoningStarted) {
-              reasoningStarted = true;
-              res.write(sseLine("response.output_item.added", {
-                type: "response.output_item.added",
-                output_index: outputIndex,
-                item: { type: "reasoning", id: reasoningId, status: "in_progress", summary: [] },
-              }));
-              outputIndex++;
-            }
-            res.write(sseLine("response.reasoning.delta", {
-              type: "response.reasoning.delta",
-              item_id: reasoningId,
-              delta: { type: "reasoning_text_delta", text: reasoning },
-            }));
-          }
-
-          if (!visible) continue; // only think content in this chunk, nothing to display
           if (!textStarted) {
             textStarted = true;
             const msgItem = {
@@ -468,14 +374,14 @@ function handleStream(upstreamUrl, apiKey, ccReq, reqBody, res) {
             }));
           }
 
-          totalContent += visible;
+          totalContent += delta.content;
 
           res.write(sseLine("response.output_text.delta", {
             type: "response.output_text.delta",
             output_index: outputIndex,
             content_index: 0,
             item_id: msgId,
-            delta: visible,
+            delta: delta.content,
           }));
         }
 
@@ -595,12 +501,10 @@ function handleStream(upstreamUrl, apiKey, ccReq, reqBody, res) {
         });
       }
 
-      // Save reasoning and tool_calls to session store
-      if (totalReasoning) {
-        const callIds = toolCalls.map((tc) => tc.id);
-        saveReasoning(callIds, totalReasoning, msgId);
-      }
+      // Save tool_calls (and reasoning) to session store
       if (toolCalls.length > 0) {
+        const callIds = toolCalls.map((tc) => tc.id);
+        if (totalReasoning) saveReasoning(callIds, totalReasoning);
         const sessionMsgs = [{
           role: "assistant",
           content: totalContent || null,
@@ -674,8 +578,11 @@ function handleNonStream(upstreamUrl, apiKey, ccReq, reqBody, res) {
         }
         const resp = toResponsesAPI(ccResp, reqBody.model);
 
+        // Save tool_calls to session store
         const msg = ccResp.choices?.[0]?.message;
         if (msg?.tool_calls?.length > 0) {
+          const callIds = msg.tool_calls.map((tc) => tc.id);
+          if (msg.reasoning_content) saveReasoning(callIds, msg.reasoning_content);
           saveSession(resp.id, [{
             role: "assistant",
             content: msg.content || null,

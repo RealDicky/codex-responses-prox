@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>模型配置管理 · Codex Proxy</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0d1117; color: #c9d1d9; min-height: 100vh; }
+.header { background: #161b22; border-bottom: 1px solid #30363d; padding: 16px 24px; display: flex; align-items: center; justify-content: space-between; }
+.header h1 { font-size: 18px; font-weight: 600; color: #f0f6fc; display: flex; align-items: center; gap: 10px; }
+.header .dot { width: 8px; height: 8px; border-radius: 50%; background: #3fb950; }
+.container { max-width: 960px; margin: 0 auto; padding: 24px; }
+.toolbar { display: flex; gap: 12px; margin-bottom: 20px; flex-wrap: wrap; align-items: center; }
+.btn { padding: 8px 16px; border: 1px solid #30363d; border-radius: 6px; font-size: 14px; cursor: pointer; transition: .15s; font-weight: 500; display: inline-flex; align-items: center; gap: 6px; }
+.btn-primary { background: #238636; border-color: #2ea043; color: #fff; }
+.btn-primary:hover { background: #2ea043; }
+.btn-danger { background: #da3633; border-color: #f85149; color: #fff; }
+.btn-danger:hover { background: #f85149; }
+.btn-ghost { background: #21262d; color: #c9d1d9; }
+.btn-ghost:hover { background: #30363d; }
+.btn-sm { padding: 4px 10px; font-size: 12px; }
+.toast { position: fixed; top: 20px; right: 20px; padding: 12px 20px; border-radius: 6px; font-size: 14px; z-index: 100; animation: slideIn .3s ease; }
+.toast-success { background: #238636; color: #fff; }
+.toast-error { background: #da3633; color: #fff; }
+@keyframes slideIn { from { opacity: 0; transform: translateX(20px); } to { opacity: 1; transform: translateX(0); } }
+.card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; overflow: hidden; }
+.card-header { padding: 12px 16px; background: #21262d; border-bottom: 1px solid #30363d; font-weight: 600; font-size: 14px; }
+.card-body { padding: 16px; }
+.model-item { display: flex; align-items: center; justify-content: space-between; padding: 14px 16px; border-bottom: 1px solid #21262d; gap: 16px; flex-wrap: wrap; }
+.model-item:last-child { border-bottom: none; }
+.model-info { flex: 1; min-width: 200px; }
+.model-name { font-weight: 600; color: #f0f6fc; font-size: 14px; }
+.model-url { font-size: 12px; color: #8b949e; margin-top: 4px; font-family: "SF Mono", Monaco, monospace; word-break: break-all; }
+.model-upstream { font-size: 12px; color: #58a6ff; margin-top: 2px; }
+.model-actions { display: flex; gap: 6px; flex-shrink: 0; }
+.empty { text-align: center; padding: 40px 20px; color: #8b949e; }
+.modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.6); display: flex; align-items: center; justify-content: center; z-index: 99; }
+.modal { background: #161b22; border: 1px solid #30363d; border-radius: 12px; width: 480px; max-width: 90vw; }
+.modal-header { padding: 16px 20px; border-bottom: 1px solid #30363d; font-size: 16px; font-weight: 600; }
+.modal-body { padding: 20px; display: flex; flex-direction: column; gap: 16px; }
+.modal-footer { padding: 12px 20px; border-top: 1px solid #30363d; display: flex; justify-content: flex-end; gap: 8px; }
+.field { display: flex; flex-direction: column; gap: 6px; }
+.field label { font-size: 13px; font-weight: 500; color: #c9d1d9; }
+.field input, .field select { padding: 8px 12px; background: #0d1117; border: 1px solid #30363d; border-radius: 6px; color: #c9d1d9; font-size: 14px; outline: none; }
+.field input:focus { border-color: #58a6ff; }
+.field .hint { font-size: 11px; color: #8b949e; }
+.mask-key { font-family: "SF Mono", Monaco, monospace; font-size: 12px; color: #8b949e; background: #21262d; padding: 2px 8px; border-radius: 4px; cursor: pointer; user-select: all; }
+</style>
+</head>
+<body>
+<div class="header">
+  <h1><span class="dot"></span>模型配置管理</h1>
+  <div style="display:flex;gap:8px;align-items:center;">
+    <span id="healthStatus" style="font-size:12px;color:#8b949e;">● 检测中…</span>
+  </div>
+</div>
+<div class="container">
+  <div class="toolbar">
+    <button class="btn btn-primary" onclick="openModal()">+ 添加模型</button>
+    <button class="btn btn-ghost" onclick="loadModels()">↻ 刷新</button>
+    <span style="margin-left:auto;font-size:12px;color:#8b949e;" id="modelCount"></span>
+  </div>
+  <div class="card">
+    <div class="card-header">已配置模型</div>
+    <div class="card-body" id="modelList">
+      <div class="empty">加载中…</div>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="modalOverlay" style="display:none;">
+  <div class="modal">
+    <div class="modal-header" id="modalTitle">添加模型</div>
+    <div class="modal-body">
+      <div class="field">
+        <label>模型名称 *</label>
+        <input id="fName" placeholder="如 astron-code-latest, gpt-4o" />
+        <span class="hint">Codex 中使用此名称引用模型</span>
+      </div>
+      <div class="field">
+        <label>上游 Base URL *</label>
+        <input id="fBaseUrl" placeholder="https://api.example.com/v1" />
+        <span class="hint">Chat Completions 端点的基础地址</span>
+      </div>
+      <div class="field">
+        <label>API Key</label>
+        <input id="fApiKey" placeholder="sk-…" />
+      </div>
+      <div class="field">
+        <label>上游模型名</label>
+        <input id="fUpstreamModel" placeholder="留空则与模型名称相同" />
+        <span class="hint">发送给上游的具体模型名称</span>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeModal()">取消</button>
+      <button class="btn btn-primary" id="modalSaveBtn" onclick="saveModel()">保存</button>
+    </div>
+  </div>
+</div>
+
+<div id="toastContainer"></div>
+
+<script>
+const API = '/admin/api/models';
+let editingName = null;
+
+async function loadModels() {
+  try {
+    const res = await fetch(API);
+    const data = await res.json();
+    renderModels(data.models || {});
+    document.getElementById('modelCount').textContent = Object.keys(data.models||{}).length + ' 个模型';
+    checkHealth();
+  } catch (e) {
+    renderModels({});
+    showToast('无法连接后端', 'error');
+  }
+}
+
+function maskKey(key) {
+  if (!key) return '（未设置）';
+  if (key.length <= 8) return key;
+  return key.slice(0, 4) + '…' + key.slice(-4);
+}
+
+function renderModels(models) {
+  const el = document.getElementById('modelList');
+  const entries = Object.entries(models);
+  if (entries.length === 0) {
+    el.innerHTML = '<div class="empty">暂无模型配置，点击「添加模型」开始</div>';
+    return;
+  }
+  el.innerHTML = entries.map(([name, cfg]) => `
+    <div class="model-item">
+      <div class="model-info">
+        <div class="model-name">${escHtml(name)}</div>
+        <div class="model-url">${escHtml(cfg.base_url)}/chat/completions</div>
+        <div class="model-upstream">→ 上游: ${escHtml(cfg.upstream_model || name)}</div>
+      </div>
+      <div class="model-actions">
+        <span class="mask-key" title="${escHtml(cfg.api_key)}">🔑 ${maskKey(cfg.api_key)}</span>
+        <button class="btn btn-ghost btn-sm" onclick="editModel('${escAttr(name)}')">编辑</button>
+        <button class="btn btn-danger btn-sm" onclick="deleteModel('${escAttr(name)}')">删除</button>
+      </div>
+    </div>
+  `).join('');
+}
+
+function openModal(name) {
+  editingName = name || null;
+  document.getElementById('modalTitle').textContent = name ? '编辑模型' : '添加模型';
+  document.getElementById('modalSaveBtn').textContent = name ? '更新' : '添加';
+  if (name) {
+    document.getElementById('fName').value = name;
+    document.getElementById('fName').readOnly = true;
+    const cfg = window._modelsCache?.[name] || {};
+    document.getElementById('fBaseUrl').value = cfg.base_url || '';
+    document.getElementById('fApiKey').value = cfg.api_key || '';
+    document.getElementById('fUpstreamModel').value = cfg.upstream_model || '';
+  } else {
+    document.getElementById('fName').value = '';
+    document.getElementById('fName').readOnly = false;
+    document.getElementById('fBaseUrl').value = '';
+    document.getElementById('fApiKey').value = '';
+    document.getElementById('fUpstreamModel').value = '';
+  }
+  document.getElementById('modalOverlay').style.display = 'flex';
+}
+
+function closeModal() {
+  document.getElementById('modalOverlay').style.display = 'none';
+  editingName = null;
+}
+
+async function saveModel() {
+  const name = document.getElementById('fName').value.trim();
+  const base_url = document.getElementById('fBaseUrl').value.trim();
+  const api_key = document.getElementById('fApiKey').value.trim();
+  const upstream_model = document.getElementById('fUpstreamModel').value.trim();
+
+  if (!name || !base_url) return showToast('模型名称和 Base URL 为必填项', 'error');
+
+  try {
+    const res = await fetch(API, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, base_url, api_key, upstream_model: upstream_model || name })
+    });
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.error || '保存失败');
+    }
+    closeModal();
+    showToast(editingName ? '模型已更新' : '模型已添加', 'success');
+    loadModels();
+  } catch (e) {
+    showToast(e.message, 'error');
+  }
+}
+
+async function editModel(name) {
+  try {
+    const res = await fetch(API);
+    const data = await res.json();
+    window._modelsCache = data.models || {};
+    openModal(name);
+  } catch (e) {
+    showToast('无法获取模型信息', 'error');
+  }
+}
+
+async function deleteModel(name) {
+  if (!confirm(`确定要删除模型「${name}」吗？`)) return;
+  try {
+    const res = await fetch(`${API}/${encodeURIComponent(name)}`, { method: 'DELETE' });
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.error || '删除失败');
+    }
+    showToast(`模型「${name}」已删除`, 'success');
+    loadModels();
+  } catch (e) {
+    showToast(e.message, 'error');
+  }
+}
+
+async function checkHealth() {
+  try {
+    const res = await fetch('/health');
+    if (res.ok) {
+      document.getElementById('healthStatus').innerHTML = '<span style="color:#3fb950;">●</span> 运行中';
+    } else {
+      document.getElementById('healthStatus').innerHTML = '<span style="color:#f85149;">●</span> 异常';
+    }
+  } catch {
+    document.getElementById('healthStatus').innerHTML = '<span style="color:#f85149;">●</span> 离线';
+  }
+}
+
+function showToast(msg, type) {
+  const el = document.createElement('div');
+  el.className = `toast toast-${type}`;
+  el.textContent = msg;
+  document.getElementById('toastContainer').appendChild(el);
+  setTimeout(() => el.remove(), 3000);
+}
+
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function escAttr(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+
+document.getElementById('modalOverlay').addEventListener('click', (e) => {
+  if (e.target === e.currentTarget) closeModal();
+});
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') closeModal();
+});
+
+loadModels();
+</script>
+</body>
+</html>
