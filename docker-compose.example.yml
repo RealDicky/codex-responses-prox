@@ -5,6 +5,7 @@ services:
     restart: unless-stopped
     ports:
       - "31415:31415"
+    volumes:
+      - ./config/models.json:/app/config/models.json
     environment:
       - PORT=31415
-      - MODEL_ROUTING={"astron-code-latest":{"base_url":"https://maas-coding-api.cn-huabei-1.xf-yun.com/v2","api_key":"your-xfyun-api-key","upstream_model":"astron-code-latest"},"deepseek-v4-pro":{"base_url":"https://api.deepseek.com/v1","api_key":"your-deepseek-api-key","upstream_model":"deepseek-v4-pro"}}

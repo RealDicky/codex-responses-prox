@@ -12,6 +12,7 @@ Codex 0.131.0+ requires `wire_api = "responses"` and no longer supports the Chat
 - Tool calling — round-trips `function_call` / `function_call_output` items between the two formats
 - Multi-model routing — configure multiple upstream providers in one proxy
 - `/v1/models` and `/health` endpoints for Codex model discovery
+- **Web admin UI** — dynamically add/edit/delete models at runtime without restarting
 
 ## Quick start
 
@@ -47,9 +48,28 @@ Set `OPENAI_API_KEY` to any non-empty value (the proxy authenticates upstream, n
 export OPENAI_API_KEY="dummy"
 ```
 
+## Web admin UI
+
+Open `http://localhost:31415/admin` in your browser to manage models dynamically:
+
+- **Add** new model routes (name, base URL, API key, upstream model)
+- **Edit** existing model configurations
+- **Delete** models you no longer need
+- Changes are saved to `config/models.json` and take effect immediately — no restart required
+
+> **Note:** API keys are stored locally in `config/models.json` (which is git-ignored). They are never exposed in the `/health` endpoint.
+
 ## Multi-model routing
 
-Configure `MODEL_ROUTING` in `docker-compose.yml` as a JSON map:
+Models can be configured via:
+
+1. **Web admin UI** (recommended) — `http://localhost:31415/admin`
+2. **Config file** — edit `config/models.json` directly
+3. **Environment variable** — set `MODEL_ROUTING` as JSON (for Docker/K8s)
+
+Priority: `config/models.json` → `config/default-models.json` → env vars
+
+### Config file format
 
 ```json
 {
@@ -66,7 +86,7 @@ Configure `MODEL_ROUTING` in `docker-compose.yml` as a JSON map:
 }
 ```
 
-Switch models in Codex by changing the `model` field in `config.toml`. Use `/health` to see all configured routes.
+Switch models in Codex by changing the `model` field in `config.toml`.
 
 ## API endpoints
 
@@ -74,7 +94,11 @@ Switch models in Codex by changing the `model` field in `config.toml`. Use `/hea
 |--------|------|-------------|
 | `POST` | `/v1/responses` | Main proxy endpoint |
 | `GET` | `/v1/models` | Model list for Codex discovery |
-| `GET` | `/health` | Health check with routing info |
+| `GET` | `/health` | Health check with routing info (API keys masked) |
+| `GET` | `/admin` | Web admin UI |
+| `GET` | `/admin/api/models` | List all models (JSON) |
+| `POST` | `/admin/api/models` | Add/update a model |
+| `DELETE` | `/admin/api/models/:name` | Delete a model |
 
 ## How it works
 
@@ -88,7 +112,23 @@ Switch models in Codex by changing the `model` field in `config.toml`. Use `/hea
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PORT` | `31415` | Proxy listen port |
-| `MODEL_ROUTING` | — | JSON map of model → upstream config |
+| `CONFIG_FILE` | `config/models.json` | Runtime model config file path |
+| `DEFAULT_CONFIG_FILE` | `config/default-models.json` | Build-time default config (no API keys) |
+| `MODEL_ROUTING` | — | JSON map of model → upstream config (fallback) |
+
+## File structure
+
+```
+├── config/
+│   ├── default-models.json   # Build-time defaults (committed, no API keys)
+│   └── models.json           # Runtime config (git-ignored, has API keys)
+├── public/
+│   └── admin.html            # Web admin UI
+├── proxy.mjs                 # Main proxy server
+├── Dockerfile
+├── docker-compose.example.yml
+└── package.json
+```
 
 ## License
 

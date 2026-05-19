@@ -9,27 +9,56 @@ const PORT = parseInt(process.env.PORT || "31415", 10);
 const CONFIG_FILE = path.resolve(process.env.CONFIG_FILE || "config/models.json");
 const PUBLIC_DIR = path.resolve(process.env.PUBLIC_DIR || "public");
 
-// Load routing from file; fall back to env vars if file missing/invalid.
+const DEFAULT_CONFIG_FILE = path.resolve(process.env.DEFAULT_CONFIG_FILE || "config/default-models.json");
+
+// Load routing: models.json → default-models.json → env vars
+// api_key from MODEL_ROUTING env var always takes precedence (file stores structure, env stores secrets)
 function loadConfig() {
+  let result = null;
+
+  // 1. Try runtime config file first
   try {
     const raw = fs.readFileSync(CONFIG_FILE, "utf8");
-    return JSON.parse(raw);
-  } catch {
-    // Seed from env vars on first boot
-    const routing = {};
+    const parsed = JSON.parse(raw);
+    if (Object.keys(parsed).length > 0) result = parsed;
+  } catch {}
+  // 2. Try default (build-time) config
+  if (!result) {
+    try {
+      const raw = fs.readFileSync(DEFAULT_CONFIG_FILE, "utf8");
+      const parsed = JSON.parse(raw);
+      if (Object.keys(parsed).length > 0) {
+        console.log("Loaded model config from default-models.json (no models.json yet)");
+        result = parsed;
+      }
+    } catch {}
+  }
+  // 3. Fall back to env vars legacy mode
+  if (!result) {
+    result = {};
     const model = process.env.UPSTREAM_MODEL || "astron-code-latest";
-    routing[model] = {
+    result[model] = {
       base_url: (process.env.UPSTREAM_BASE_URL || "https://maas-coding-api.cn-huabei-1.xf-yun.com/v2").replace(/\/+$/, ""),
       api_key: process.env.UPSTREAM_API_KEY || "",
       upstream_model: model,
     };
-    // Also honour MODEL_ROUTING env var
-    const rawRouting = process.env.MODEL_ROUTING;
-    if (rawRouting) {
-      try { return JSON.parse(rawRouting); } catch { console.error("Invalid MODEL_ROUTING JSON"); }
-    }
-    return routing;
   }
+
+  // Always merge api_key from MODEL_ROUTING env var (secrets in env take precedence)
+  const rawRouting = process.env.MODEL_ROUTING;
+  if (rawRouting) {
+    try {
+      const envRouting = JSON.parse(rawRouting);
+      for (const [model, cfg] of Object.entries(envRouting)) {
+        if (cfg.api_key && result[model] && !result[model].api_key) {
+          result[model].api_key = cfg.api_key;
+        }
+        if (!result[model]) result[model] = cfg;
+      }
+    } catch { console.error("Invalid MODEL_ROUTING JSON"); }
+  }
+
+  return result;
 }
 
 function saveConfig() {
@@ -283,6 +312,7 @@ function handleStream(upstreamUrl, apiKey, ccReq, reqBody, res) {
   };
 
   const upstreamReq = https.request(options, (upstreamRes) => {
+    console.log(`[stream] upstream status=${upstreamRes.statusCode} model=${reqBody.model}`);
     if (upstreamRes.statusCode !== 200) {
       let errBody = "";
       upstreamRes.on("data", (c) => (errBody += c));
@@ -420,6 +450,9 @@ function handleStream(upstreamUrl, apiKey, ccReq, reqBody, res) {
 
         // --- Text content (strip embedded <think>...</think> blocks) ---
         if (delta.content) {
+          if (delta.content.includes("<think") || delta.content.includes("</think>")) {
+            console.log(`[think] raw delta.content contains think tag: ${JSON.stringify(delta.content).slice(0, 300)}`);
+          }
           const { visible, reasoning } = processContentDelta(delta.content);
 
           // Forward extracted think text as reasoning events
@@ -441,42 +474,46 @@ function handleStream(upstreamUrl, apiKey, ccReq, reqBody, res) {
             }));
           }
 
-          if (!visible) continue; // only think content in this chunk, nothing to display
-          if (!textStarted) {
-            textStarted = true;
-            const msgItem = {
-              type: "message",
-              id: msgId,
-              role: "assistant",
-              content: [],
-              status: "in_progress",
-            };
+          if (!visible) {
+            // All content was inside <think>, skip SSE text events but don't
+            // skip the rest of this chunk (tool_calls may still be present).
+          } else {
+            if (!textStarted) {
+              textStarted = true;
+              const msgItem = {
+                type: "message",
+                id: msgId,
+                role: "assistant",
+                content: [],
+                status: "in_progress",
+              };
 
-            res.write(sseLine("response.output_item.added", {
-              type: "response.output_item.added",
-              output_index: outputIndex,
-              item: msgItem,
-            }));
+              res.write(sseLine("response.output_item.added", {
+                type: "response.output_item.added",
+                output_index: outputIndex,
+                item: msgItem,
+              }));
 
-            const textPart = { type: "output_text", text: "" };
-            res.write(sseLine("response.content_part.added", {
-              type: "response.content_part.added",
+              const textPart = { type: "output_text", text: "" };
+              res.write(sseLine("response.content_part.added", {
+                type: "response.content_part.added",
+                output_index: outputIndex,
+                content_index: 0,
+                item_id: msgId,
+                part: textPart,
+              }));
+            }
+
+            totalContent += visible;
+
+            res.write(sseLine("response.output_text.delta", {
+              type: "response.output_text.delta",
               output_index: outputIndex,
               content_index: 0,
               item_id: msgId,
-              part: textPart,
+              delta: visible,
             }));
           }
-
-          totalContent += visible;
-
-          res.write(sseLine("response.output_text.delta", {
-            type: "response.output_text.delta",
-            output_index: outputIndex,
-            content_index: 0,
-            item_id: msgId,
-            delta: visible,
-          }));
         }
 
         // --- Tool calls ---
@@ -612,6 +649,8 @@ function handleStream(upstreamUrl, apiKey, ccReq, reqBody, res) {
         }];
         saveSession(respId, sessionMsgs);
       }
+
+      console.log(`[stream] done content=${totalContent.length} reasoning=${totalReasoning.length} toolCalls=${toolCalls.length} model=${reqBody.model}`);
 
       // response.completed
       res.write(sseLine("response.completed", {

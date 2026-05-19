@@ -2,11 +2,14 @@ FROM node:22-alpine
 
 WORKDIR /app
 COPY package.json proxy.mjs ./
+COPY config/default-models.json config/default-models.json
+COPY public/ public/
 
 ENV PORT=31415
-ENV UPSTREAM_BASE_URL=https://maas-coding-api.cn-huabei-1.xf-yun.com/v2
-ENV UPSTREAM_API_KEY=""
-ENV UPSTREAM_MODEL=""
+ENV CONFIG_FILE=config/models.json
+
+# Create config dir; models.json will be auto-seeded from default on first boot
+RUN mkdir -p config
 
 EXPOSE 31415
 
